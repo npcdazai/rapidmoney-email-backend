@@ -1,0 +1,22 @@
+{
+  "name": "rpm-crm-backend",
+  "version": "1.0.0",
+  "description": "RapidMoney CRM — Express + PostgreSQL backend",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "migrate": "node src/migrate.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "imapflow": "^1.0.164",
+    "mailparser": "^3.7.1",
+    "morgan": "^1.10.0",
+    "nodemailer": "^6.9.14",
+    "pg": "^8.12.0"
+  }
+}
