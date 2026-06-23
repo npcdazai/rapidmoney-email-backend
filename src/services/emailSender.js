@@ -19,10 +19,31 @@ function getTransporter() {
 }
 
 /**
+ * Send a plain email (no threading) — used for internal QRC routing alerts.
+ */
+export async function sendMail({ to, subject, body }) {
+  const info = await getTransporter().sendMail({
+    from: `RapidMoney Support <${config.gmailEmail}>`,
+    to,
+    subject,
+    text: body,
+  });
+  return { messageId: info.messageId };
+}
+
+/**
  * Send a reply to a customer. Uses In-Reply-To/References so the reply lands
  * in the same Gmail thread as the original message.
  */
-export async function sendReply({ to, subject, body, messageId, threadId }) {
+export async function sendReply({
+  to,
+  subject,
+  body,
+  html,
+  attachments,
+  messageId,
+  threadId,
+}) {
   const replySubject = subject.startsWith("Re:") ? subject : `Re: ${subject}`;
   const headers = {};
   const ref = messageId || threadId;
@@ -31,14 +52,24 @@ export async function sendReply({ to, subject, body, messageId, threadId }) {
     headers["References"] = ref;
   }
 
-  const info = await getTransporter().sendMail({
+  const mail = {
     from: `RapidMoney Support <${config.gmailEmail}>`,
     to,
     subject: replySubject,
-    text: body,
+    text: body || "",
     headers,
-  });
+  };
+  if (html && html.trim()) mail.html = html;
+  if (Array.isArray(attachments) && attachments.length) {
+    mail.attachments = attachments.map((a) => ({
+      filename: a.filename || "attachment",
+      content: a.content, // base64 string
+      encoding: "base64",
+      contentType: a.contentType || undefined,
+    }));
+  }
 
+  const info = await getTransporter().sendMail(mail);
   return { subject: replySubject, messageId: info.messageId };
 }
 

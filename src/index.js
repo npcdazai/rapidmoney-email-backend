@@ -3,6 +3,7 @@ import cors from "cors";
 import morgan from "morgan";
 import { config } from "./config.js";
 import { runMigrations } from "./migrate.js";
+import { loadSettings, getSettings, setAutoReplyEnabled } from "./settings.js";
 import { ticketsRouter } from "./routes/tickets.js";
 import { startEmailPoller, stopEmailPoller } from "./services/emailPoller.js";
 import { startSlaMonitor, stopSlaMonitor } from "./services/slaMonitor.js";
@@ -10,7 +11,7 @@ import { startSlaMonitor, stopSlaMonitor } from "./services/slaMonitor.js";
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "25mb" })); // allow base64 reply attachments
 app.use(morgan("tiny"));
 
 app.get("/health", (_req, res) =>
@@ -18,6 +19,18 @@ app.get("/health", (_req, res) =>
 );
 
 app.use("/api/tickets", ticketsRouter);
+
+// Runtime settings (auto-reply toggle)
+app.get("/api/settings", (_req, res) => res.json(getSettings()));
+app.patch("/api/settings", async (req, res, next) => {
+  try {
+    if (typeof req.body.autoReplyEnabled === "boolean")
+      await setAutoReplyEnabled(req.body.autoReplyEnabled);
+    res.json(getSettings());
+  } catch (e) {
+    next(e);
+  }
+});
 
 // Central error handler — FastAPI-style { detail }
 app.use((err, _req, res, _next) => {
@@ -27,6 +40,7 @@ app.use((err, _req, res, _next) => {
 
 async function main() {
   await runMigrations();
+  await loadSettings();
   startEmailPoller();
   startSlaMonitor();
 

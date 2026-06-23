@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { pool, query } from "./db.js";
 import { config, slaHoursFor } from "./config.js";
+import { classify } from "./services/classifier.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -15,14 +16,62 @@ const ALTERS = [
   "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS assigned_to VARCHAR(100)",
   "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT FALSE",
   "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS flagged BOOLEAN DEFAULT FALSE",
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_replied BOOLEAN DEFAULT FALSE",
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reference VARCHAR(30)",
+  // structured auto-reply outcome (for analytics)
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_reply_mode VARCHAR(30)",
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_reply_group VARCHAR(12)",
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_reply_subcat VARCHAR(40)",
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_reply_routed_to VARCHAR(120)",
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_reply_confidence DOUBLE PRECISION",
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_replied_at TIMESTAMPTZ",
+  // widen category from CHAR(1) to hold the new taxonomy codes
+  "ALTER TABLE tickets ALTER COLUMN category TYPE VARCHAR(40)",
+];
+
+// Map the legacy Q/R/C codes onto the new taxonomy.
+const LEGACY_MAP = [
+  ["C", "complaint"],
+  ["R", "support"],
+  ["Q", "inquiry"],
 ];
 
 export async function runMigrations() {
   const schema = await readFile(join(__dirname, "schema.sql"), "utf8");
   await query(schema);
   for (const sql of ALTERS) await query(sql);
+  for (const [old, code] of LEGACY_MAP) {
+    await query(`UPDATE tickets SET category = $1 WHERE category = $2`, [code, old]);
+  }
   await backfillSla();
+  const n = await reclassify(false); // categorize anything still uncategorized
+  if (n) console.log(`[MIGRATE] auto-categorized ${n} uncategorized ticket(s)`);
   console.log("[MIGRATE] schema ready");
+}
+
+/**
+ * Run the keyword classifier over tickets and set category + priority.
+ * @param {boolean} all  true = reclassify every ticket; false = only NULL category.
+ * Recalculates sla_due_at to match the assigned priority.
+ */
+export async function reclassify(all = false) {
+  const where = all ? "" : "WHERE category IS NULL";
+  const { rows } = await query(
+    `SELECT id, subject, body, priority FROM tickets ${where}`
+  );
+  for (const t of rows) {
+    const { code, priority } = classify(t.subject || "", t.body || "");
+    const hours = slaHoursFor(priority);
+    await query(
+      `UPDATE tickets
+          SET category = $1, priority = $2,
+              sla_due_at = received_at + ($3 || ' hours')::interval,
+              updated_at = now()
+        WHERE id = $4`,
+      [code, priority, hours, t.id]
+    );
+  }
+  return rows.length;
 }
 
 // Backfill sla_due_at for tickets missing it; silently mark pre-existing

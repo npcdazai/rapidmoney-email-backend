@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS ticket_replies (
     sent_at     TIMESTAMPTZ DEFAULT now()
 );
 
+-- runtime, UI-editable settings (key/value)
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        VARCHAR(60) PRIMARY KEY,
+    value      TEXT,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_tickets_status   ON tickets(status);
 CREATE INDEX IF NOT EXISTS idx_tickets_category ON tickets(category);
 CREATE INDEX IF NOT EXISTS idx_tickets_priority ON tickets(priority);
