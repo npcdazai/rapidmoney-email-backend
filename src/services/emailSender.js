@@ -72,6 +72,7 @@ export async function sendMail({ to, subject, body }) {
  */
 export async function sendReply({
   to,
+  cc,
   subject,
   body,
   html,
@@ -95,6 +96,7 @@ export async function sendReply({
     text: body || "",
     headers,
   };
+  if (cc && cc.trim()) mail.cc = cc; // dropped by deliver() in UAT mode
   if (html && html.trim()) mail.html = html;
   if (Array.isArray(attachments) && attachments.length) {
     mail.attachments = attachments.map((a) => ({

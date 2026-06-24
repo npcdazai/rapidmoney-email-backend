@@ -4,7 +4,7 @@ import { config } from "../config.js";
 import { signToken, TOKEN_TYPE } from "../auth/jwt.js";
 import { loadUser, publicUser } from "../auth/repo.js";
 import { checkPermission } from "../auth/middleware.js";
-import { sendCreatePasswordEmail } from "../services/authEmail.js";
+import { sendCreatePasswordEmail, sendResetPasswordEmail } from "../services/authEmail.js";
 import { MODULES, sanitizeModules, DEFAULT_MODULES } from "../auth/modules.js";
 
 // Mounted at /api/auth/admin (behind authMiddleware).
@@ -234,6 +234,29 @@ adminUsersRouter.post("/users/:id/force-logout", checkPermission("users.update")
     if (existing.rows.length === 0) return res.status(404).json({ detail: "User not found" });
     const { rowCount } = await query(`DELETE FROM tokens WHERE user_id = $1`, [req.params.id]);
     res.json({ ok: true, sessions_cleared: rowCount });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/auth/admin/users/:id/reset-password — generate a 1h reset link
+// (also emailed). The link is returned so an admin can hand it over directly.
+adminUsersRouter.post("/users/:id/reset-password", checkPermission("users.update"), async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT id, email, name FROM users WHERE id = $1`, [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ detail: "User not found" });
+    const user = rows[0];
+
+    const token = signToken({ sub: user.id, type: TOKEN_TYPE.RESET_PASSWORD }, "1h");
+    const resetUrl = `${config.frontendUrl}/auth/reset-password?token=${token}`;
+    let emailSent = true;
+    try {
+      await sendResetPasswordEmail(user, token);
+    } catch (e) {
+      emailSent = false;
+      console.error("[admin reset-password] email send failed:", e.message);
+    }
+    res.json({ email: user.email, resetToken: token, resetUrl, emailSent });
   } catch (e) {
     next(e);
   }

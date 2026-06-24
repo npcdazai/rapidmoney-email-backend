@@ -472,7 +472,7 @@ ticketsRouter.patch("/:id/category", async (req, res, next) => {
 // POST /api/tickets/:id/reply — email the customer + record the reply
 ticketsRouter.post("/:id/reply", async (req, res, next) => {
   try {
-    const { body, html, attachments, sent_by = "Agent" } = req.body;
+    const { body, html, attachments, cc, sent_by = "Agent" } = req.body;
     const hasText = body && body.trim();
     const hasHtml = html && html.trim();
     if (!hasText && !hasHtml)
@@ -489,6 +489,7 @@ ticketsRouter.post("/:id/reply", async (req, res, next) => {
     try {
       sent = await sendReply({
         to: ticket.from_email,
+        cc,
         subject: ticket.subject || "(no subject)",
         body,
         html,
@@ -506,10 +507,10 @@ ticketsRouter.post("/:id/reply", async (req, res, next) => {
         (attachCount ? `\n\n📎 ${attachCount} attachment(s)` : "")).trim();
     const { rows: replyRows } = await query(
       `INSERT INTO ticket_replies
-         (ticket_id, direction, from_email, to_email, subject, body, sent_by)
-       VALUES ($1,'outbound',$2,$3,$4,$5,$6)
+         (ticket_id, direction, from_email, to_email, cc, subject, body, sent_by)
+       VALUES ($1,'outbound',$2,$3,$4,$5,$6,$7)
        RETURNING id, to_email, subject, sent_at`,
-      [ticket.id, config.gmailEmail, ticket.from_email, sent.subject, storedBody, sent_by]
+      [ticket.id, config.gmailEmail, ticket.from_email, cc || null, sent.subject, storedBody, sent_by]
     );
 
     // Open -> In Progress on first agent reply
@@ -529,6 +530,65 @@ ticketsRouter.post("/:id/reply", async (req, res, next) => {
       sent_at: replyRows[0].sent_at,
       ticket_status: newStatus,
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/tickets/compose — send a brand-new email (To/Cc/Subject/Body),
+// log it as an outbound-initiated ticket so the thread is tracked.
+ticketsRouter.post("/compose", async (req, res, next) => {
+  try {
+    const { to, cc, subject, body, html, attachments, sent_by = "Agent" } = req.body;
+    if (!to || !to.trim())
+      return res.status(422).json({ detail: "Recipient (To) is required" });
+    const hasText = body && body.trim();
+    const hasHtml = html && html.trim();
+    if (!hasText && !hasHtml)
+      return res.status(422).json({ detail: "Message body is required" });
+
+    let sent;
+    try {
+      sent = await sendReply({
+        to,
+        cc,
+        subject: subject || "(no subject)",
+        body,
+        html,
+        attachments,
+        prefixRe: false, // brand-new email — no "Re:" prefix, no threading
+      });
+    } catch (e) {
+      return res.status(500).json({ detail: `Email send failed: ${e.message}` });
+    }
+
+    // Track it as a ticket (outbound-initiated). Recipient is the "customer".
+    const hours = slaHoursFor("P3");
+    const attachCount = Array.isArray(attachments) ? attachments.length : 0;
+    const storedBody =
+      ((hasText ? body : "(formatted message)") +
+        (attachCount ? `\n\n📎 ${attachCount} attachment(s)` : "")).trim();
+    const { rows } = await query(
+      `INSERT INTO tickets
+         (from_email, from_name, subject, body, received_at, priority, status, sla_due_at, is_read)
+       VALUES ($1,$1,$2,$3,now(),'P3','In Progress', now() + ($4 || ' hours')::interval, TRUE)
+       RETURNING id`,
+      [to, subject || "(no subject)", storedBody, hours]
+    );
+    const ticketId = rows[0].id;
+    await query(
+      `INSERT INTO ticket_replies
+         (ticket_id, direction, from_email, to_email, cc, subject, body, sent_by)
+       VALUES ($1,'outbound',$2,$3,$4,$5,$6,$7)`,
+      [ticketId, config.gmailEmail, to, cc || null, sent.subject, storedBody, sent_by]
+    );
+    await query(
+      `INSERT INTO ticket_notes (ticket_id, note, is_internal, created_by)
+       VALUES ($1,$2,TRUE,$3)`,
+      [ticketId, `New email composed by ${sent_by}${cc ? ` (cc: ${cc})` : ""}.`, "System"]
+    );
+
+    res.json({ ok: true, ticket_id: ticketId, to, subject: sent.subject });
   } catch (e) {
     next(e);
   }

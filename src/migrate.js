@@ -26,6 +26,7 @@ const ALTERS = [
   "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_reply_routed_to VARCHAR(120)",
   "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_reply_confidence DOUBLE PRECISION",
   "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_replied_at TIMESTAMPTZ",
+  "ALTER TABLE ticket_replies ADD COLUMN IF NOT EXISTS cc VARCHAR(500)",
   // widen category from CHAR(1) to hold the new taxonomy codes
   "ALTER TABLE tickets ALTER COLUMN category TYPE VARCHAR(40)",
 ];
