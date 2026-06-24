@@ -5,8 +5,25 @@ import { sendReply } from "../services/emailSender.js";
 import { maybeAutoReply } from "../services/autoReply.js";
 import { CATEGORY_CODES, CATEGORIES, GROUPS } from "../services/classifier.js";
 import { reclassify } from "../migrate.js";
+import { requireModule, activityLog } from "../auth/middleware.js";
+import { MAIL_SECTIONS, requiredMailSection } from "../auth/modules.js";
 
 export const ticketsRouter = Router();
+
+// authMiddleware runs at the mount point (index.js), so req.user is set here.
+// Gate each ticket endpoint by the dashboard section it belongs to:
+//   • /analytics            → analytics
+//   • /:id/autoreply        → autoreply
+//   • GET /  (folder list)  → the specific Mail section being requested
+//   • everything else       → any Mail section (folders, stats, detail, actions)
+ticketsRouter.use(activityLog);
+ticketsRouter.use((req, res, next) => {
+  if (req.path === "/analytics") return requireModule("analytics")(req, res, next);
+  if (/^\/\d+\/autoreply$/.test(req.path)) return requireModule("autoreply")(req, res, next);
+  if (req.path === "/" && req.method === "GET")
+    return requireModule(requiredMailSection(req.query))(req, res, next);
+  return requireModule(...MAIL_SECTIONS)(req, res, next);
+});
 
 const VALID_STATUS = [
   "Open",
@@ -58,7 +75,10 @@ ticketsRouter.get("/folders", async (_req, res, next) => {
         COUNT(*) FILTER (WHERE status = 'Open' AND is_read = FALSE)    AS open_unread,
         COUNT(*) FILTER (WHERE status = 'In Progress')                 AS in_progress_total,
         COUNT(*) FILTER (WHERE status = 'Pending Customer')            AS pending_total,
-        COUNT(*) FILTER (WHERE status IN ('Resolved','Closed'))        AS resolved_total,
+        COUNT(*) FILTER (WHERE status = 'Resolved')                    AS resolved_total,
+        COUNT(*) FILTER (WHERE status = 'Resolved' AND is_read = FALSE) AS resolved_unread,
+        COUNT(*) FILTER (WHERE status = 'Closed')                      AS closed_total,
+        COUNT(*) FILTER (WHERE status = 'Closed' AND is_read = FALSE)  AS closed_unread,
         COUNT(*) FILTER (WHERE flagged = TRUE)                         AS flagged_total,
         COUNT(*) FILTER (WHERE sla_breached = TRUE AND status NOT IN ('Resolved','Closed')) AS breached_total,
         COUNT(*) FILTER (WHERE auto_replied = TRUE)                    AS auto_replied_total,

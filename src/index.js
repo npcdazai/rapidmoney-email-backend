@@ -5,6 +5,8 @@ import { config } from "./config.js";
 import { runMigrations } from "./migrate.js";
 import { loadSettings, getSettings, setAutoReplyEnabled } from "./settings.js";
 import { ticketsRouter } from "./routes/tickets.js";
+import { authRouter } from "./routes/auth.js";
+import { authMiddleware, requireModule } from "./auth/middleware.js";
 import { startEmailPoller, stopEmailPoller } from "./services/emailPoller.js";
 import { startSlaMonitor, stopSlaMonitor } from "./services/slaMonitor.js";
 
@@ -18,11 +20,13 @@ app.get("/health", (_req, res) =>
   res.json({ status: "ok", service: "rpm-crm-backend" })
 );
 
-app.use("/api/tickets", ticketsRouter);
+app.use("/api/auth", authRouter);
+app.use("/api/tickets", authMiddleware, ticketsRouter);
 
-// Runtime settings (auto-reply toggle)
-app.get("/api/settings", (_req, res) => res.json(getSettings()));
-app.patch("/api/settings", async (req, res, next) => {
+// Runtime settings (auto-reply toggle). Any authenticated user may read the
+// state; only those allocated the Auto-reply module may change it.
+app.get("/api/settings", authMiddleware, (_req, res) => res.json(getSettings()));
+app.patch("/api/settings", authMiddleware, requireModule("autoreply"), async (req, res, next) => {
   try {
     if (typeof req.body.autoReplyEnabled === "boolean")
       await setAutoReplyEnabled(req.body.autoReplyEnabled);

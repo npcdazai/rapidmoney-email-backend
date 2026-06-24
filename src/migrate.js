@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { pool, query } from "./db.js";
 import { config, slaHoursFor } from "./config.js";
 import { classify } from "./services/classifier.js";
+import { seedAuth } from "./auth/seed.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -46,6 +47,7 @@ export async function runMigrations() {
   await backfillSla();
   const n = await reclassify(false); // categorize anything still uncategorized
   if (n) console.log(`[MIGRATE] auto-categorized ${n} uncategorized ticket(s)`);
+  await seedAuth();
   console.log("[MIGRATE] schema ready");
 }
 

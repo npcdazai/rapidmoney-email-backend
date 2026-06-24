@@ -153,40 +153,66 @@ export function classifyQRC(subject = "", body = "") {
   };
 }
 
-// ───────── Templates ─────────
-const SIGNOFF =
-  "Warm regards,\nRapidMoney Support\nHelp Centre: https://rapidmoney.in/help";
-const finePrint = (ref) =>
-  `This is an auto-generated acknowledgement for reference ${ref}. Please do not share passwords or OTPs over email. RapidMoney will never ask for them.`;
-const wrap = (name, core, ref) =>
-  `Dear ${name},\n\n${core}\n\n${SIGNOFF}\n\n${finePrint(ref)}`;
+// ───────── Customer auto-reply templates (RapidMoney QRC auto-reply responses) ─────────
+// Each template has its own fixed Subject and Body. Greeting is "Hello," (no
+// name needed); no reference number is shown to the customer. Selected by group
+// + confidence (low confidence → universal catch-all).
+const SIGNOFF = "Warm Regards,\nCustomer Experience Team\nRapidMoney";
 
-// Query — auto-answered live from the knowledge base (the only non-fixed one).
-export const queryAutoAnswerBody = (name, answer, ref) => wrap(name, answer, ref);
+export const TEMPLATES = {
+  // Query — information request · 24 business hours
+  query: {
+    subject: "RapidMoney Support: We have received your query",
+    body:
+      "Hello,\n\nThank you for reaching out to RapidMoney. We have received your query and our team is reviewing it.\n\n" +
+      "To help us assist you faster, kindly reply with:\n• Full Name\n• Registered Mobile Number\n\n" +
+      "Our team will get back to you within 24 business hours. For account-specific details such as your application status, EMIs or statements, you can also log in to the RapidMoney app.\n\n" +
+      "Thank you for choosing RapidMoney.\n\n" +
+      SIGNOFF,
+  },
+  // Request — action or document · 2 business days
+  request: {
+    subject: "RapidMoney Support: Your request has been logged",
+    body:
+      "Hello,\n\nThank you for contacting RapidMoney. We have logged your request and assigned it to the relevant team for processing.\n\n" +
+      "To help us process it securely, kindly reply with:\n• Full Name\n• Registered Mobile Number\n\n" +
+      "For account-related actions we may verify your identity before proceeding. Our team will action your request and share an update within 2 business days.\n\n" +
+      "Thank you for choosing RapidMoney.\n\n" +
+      SIGNOFF,
+  },
+  // Complaint — grievance · 3 business days
+  complaint: {
+    subject: "RapidMoney Support: Your concern has been registered",
+    body:
+      "Hello,\n\nThank you for writing to us, and we are sorry for the inconvenience. Your concern has been registered as a grievance and assigned to our resolution team.\n\n" +
+      "To help us investigate quickly, kindly reply with:\n• Full Name\n• Registered Mobile Number\n• Any relevant dates, amounts or screenshots\n\n" +
+      "Our team will review the details and respond within 3 business days. If you are not satisfied with the resolution, you may escalate to our Grievance Redressal Officer at grievance@rapidmoney.in.\n\n" +
+      "We value your trust and are committed to making this right.\n\n" +
+      SIGNOFF,
+  },
+  // Universal acknowledgement — catch-all · 24 business hours
+  universal: {
+    subject: "RapidMoney Support: We have received your message",
+    body:
+      "Hello,\n\nThank you for contacting RapidMoney. This is an automated acknowledgement to confirm that we have successfully received your request and assigned it to the relevant team.\n\n" +
+      "To help us assist you faster, kindly reply with:\n• Full Name\n• Registered Mobile Number\n\n" +
+      "Our team is reviewing your request and will get back to you within 24 business hours.\n\n" +
+      "Thank you for choosing RapidMoney.\n\n" +
+      SIGNOFF,
+  },
+};
 
-// Query — acknowledged (account-specific or low confidence → routed to a human).
-export const queryAckBody = (name, ref) =>
-  wrap(
-    name,
-    `Thank you for reaching out. We have received your query.\n\nYour reference number is ${ref}. Please quote it in any follow-up.\n\nOur team will get back to you within ${TAT.query}. For account-specific details, you can also log in to the RapidMoney app.`,
-    ref
-  );
-
-// Request — acknowledged (routed to the owning team).
-export const requestAckBody = (name, ref) =>
-  wrap(
-    name,
-    `Thank you for your request. We have logged it for processing.\n\nYour reference number is ${ref}. Please quote it in any follow-up.\n\nThe relevant team will action it and update you within ${TAT.request}. For account-specific actions we may verify your identity before proceeding.`,
-    ref
-  );
-
-// Complaint — acknowledged (routed to the grievance desk).
-export const complaintAckBody = (name, ref) =>
-  wrap(
-    name,
-    `Thank you for writing to us. We are sorry for the inconvenience and have registered your concern as a grievance.\n\nYour reference number is ${ref}. Please quote it in any follow-up.\n\nOur grievance team is reviewing it and will respond within ${TAT.complaint}. If you are not satisfied with the resolution, you may escalate to our Grievance Officer at grievance@rapidmoney.in.`,
-    ref
-  );
+/**
+ * Pick the customer template key from the QRC group + confidence.
+ * Low confidence (or anything not clearly Q/R/C) → universal catch-all.
+ */
+export function pickTemplate(group, confident) {
+  if (!confident) return "universal";
+  if (group === "request") return "request";
+  if (group === "complaint") return "complaint";
+  if (group === "query") return "query";
+  return "universal";
+}
 
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 

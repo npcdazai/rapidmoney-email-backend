@@ -19,16 +19,51 @@ function getTransporter() {
 }
 
 /**
+ * THE single outbound choke point. Every email in this service goes through
+ * deliver(), so the UAT sink cannot be bypassed by any current or future
+ * caller. When UAT_REDIRECT_EMAIL is set:
+ *   • every recipient (to/cc/bcc) is replaced by the sink address — no
+ *     customer or internal team is ever emailed;
+ *   • the intended recipient is preserved in the subject tag + a body banner.
+ */
+// Pure recipient guard — rewrites the mail object for the UAT sink. Exported so
+// it can be verified in isolation. Returns a NEW object; never mutates input.
+export function prepareForDelivery(mail) {
+  const sink = config.uatRedirectEmail;
+  if (!sink) return mail;
+  const intended = mail.to;
+  const note = `[UAT REDIRECT] Generated for ${intended}; redirected here in the UAT environment. The real recipient was NOT emailed.`;
+  return {
+    ...mail,
+    to: sink,
+    cc: undefined, // strip any stray copy recipients
+    bcc: undefined,
+    subject: `[UAT→${intended}] ${mail.subject || ""}`,
+    text: mail.text != null ? `${note}\n\n----------\n\n${mail.text}` : mail.text,
+    html: mail.html
+      ? `<p style="color:#b45309"><b>[UAT REDIRECT]</b> Generated for ${intended}; the real recipient was NOT emailed.</p><hr>${mail.html}`
+      : mail.html,
+  };
+}
+
+async function deliver(mail) {
+  const info = await getTransporter().sendMail(prepareForDelivery(mail));
+  return { messageId: info.messageId };
+}
+
+/** True when running as a UAT sink (no mail reaches real recipients). */
+export const isUatRedirect = () => !!config.uatRedirectEmail;
+
+/**
  * Send a plain email (no threading) — used for internal QRC routing alerts.
  */
 export async function sendMail({ to, subject, body }) {
-  const info = await getTransporter().sendMail({
+  return deliver({
     from: `RapidMoney Support <${config.gmailEmail}>`,
     to,
     subject,
     text: body,
   });
-  return { messageId: info.messageId };
 }
 
 /**
@@ -43,8 +78,9 @@ export async function sendReply({
   attachments,
   messageId,
   threadId,
+  prefixRe = true, // false → use the given subject verbatim (fixed-subject templates)
 }) {
-  const replySubject = subject.startsWith("Re:") ? subject : `Re: ${subject}`;
+  const replySubject = !prefixRe || subject.startsWith("Re:") ? subject : `Re: ${subject}`;
   const headers = {};
   const ref = messageId || threadId;
   if (ref) {
@@ -69,13 +105,13 @@ export async function sendReply({
     }));
   }
 
-  const info = await getTransporter().sendMail(mail);
+  const info = await deliver(mail);
   return { subject: replySubject, messageId: info.messageId };
 }
 
 /**
- * Supervisor SLA breach alert. Implemented but only fires when
- * SLA_ALERTS_ENABLED=true (paused by default, mirroring the original).
+ * Supervisor SLA breach alert. Only fires when SLA_ALERTS_ENABLED=true
+ * (paused by default). Also routed through the UAT sink.
  */
 export async function sendSlaAlert(ticket) {
   const subject = `[SLA BREACH] Ticket #${ticket.id} — ${ticket.subject || "(no subject)"}`;
@@ -90,7 +126,7 @@ export async function sendSlaAlert(ticket) {
     `Open in portal: ${config.portalUrl}`,
   ].join("\n");
 
-  await getTransporter().sendMail({
+  return deliver({
     from: `RapidMoney CRM <${config.gmailEmail}>`,
     to: config.supervisorEmail,
     subject,

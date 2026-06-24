@@ -15,7 +15,6 @@
 import { config } from "../config.js";
 import { query } from "../db.js";
 import { sendReply, sendMail } from "./emailSender.js";
-import { intentByKey } from "./knowledgeBase.js";
 import { isAutoReplyEnabled } from "../settings.js";
 import { analyzeQRC } from "./aiClassifier.js";
 import {
@@ -23,10 +22,8 @@ import {
   classifyQRC,
   makeReference,
   internalAlert,
-  queryAutoAnswerBody,
-  queryAckBody,
-  requestAckBody,
-  complaintAckBody,
+  TEMPLATES,
+  pickTemplate,
 } from "./qrc.js";
 
 // Senders we must never auto-reply to (mail-loop / bounce protection).
@@ -56,14 +53,24 @@ export async function maybeAutoReply(ticket, opts = {}) {
     if (ticket.category === "spam") return false;
     const seen = await query(`SELECT auto_replied FROM tickets WHERE id = $1`, [ticket.id]);
     if (seen.rows[0]?.auto_replied) return false;
+    // Freshness: don't auto-reply to stale backlog (mail older than the window).
+    const recvMs = ticket.received_at ? new Date(ticket.received_at).getTime() : Date.now();
+    const ageHours = (Date.now() - recvMs) / 3_600_000;
+    if (ageHours > config.autoReplyMaxAgeHours) {
+      console.log(
+        `[AUTO-REPLY] skipped #${ticket.id} — email is ${ageHours.toFixed(1)}h old (> ${config.autoReplyMaxAgeHours}h window)`
+      );
+      return false;
+    }
   }
   // Loop protection + gmail-only allowlist always apply, even for manual sends.
   if (NO_REPLY.test(ticket.from_email || "")) {
     console.log(`[AUTO-REPLY] skipped #${ticket.id} — no-reply/automated sender`);
     return false;
   }
+  // Gmail-only allowlist (skipped in UAT — mail goes to the sink, not customers).
   const domain = (ticket.from_email || "").split("@").pop()?.toLowerCase() || "";
-  if (!config.autoReplyDomains.includes(domain)) {
+  if (!config.uatRedirectEmail && !config.autoReplyDomains.includes(domain)) {
     console.log(`[AUTO-REPLY] skipped #${ticket.id} — domain "${domain}" not in allowlist`);
     return false;
   }
@@ -72,38 +79,20 @@ export async function maybeAutoReply(ticket, opts = {}) {
   const qrc = (await analyzeQRC(ticket.subject, ticket.body)) || classifyQRC(ticket.subject, ticket.body);
   const sub = SUBCATS[qrc.subKey] || SUBCATS.general_info;
   const group = sub.group;
-  const accountSpecific = qrc.accountSpecific ?? sub.accountSpecific ?? false;
   const confident = (qrc.confidence ?? 0.9) >= CONFIDENCE_FLOOR;
-  const name = firstName(ticket.from_name, ticket.from_email);
   const ref = makeReference(ticket.received_at, ticket.id);
 
-  // Choose the outgoing template per the spec's hard rules.
-  let body;
-  let mode;
-  if (group === "query" && confident && !accountSpecific && sub.kb) {
-    const answer = intentByKey(sub.kb)?.answer;
-    if (answer) {
-      body = queryAutoAnswerBody(name, answer, ref);
-      mode = "query_auto_answer";
-    } else {
-      body = queryAckBody(name, ref);
-      mode = "query_ack";
-    }
-  } else if (group === "request") {
-    body = requestAckBody(name, ref);
-    mode = "request_ack";
-  } else if (group === "complaint") {
-    body = complaintAckBody(name, ref);
-    mode = "complaint_ack";
-  } else {
-    body = queryAckBody(name, ref); // query: account-specific or low-confidence
-    mode = "query_ack";
-  }
+  // Pick the fixed customer template (low confidence → universal catch-all).
+  const templateKey = pickTemplate(group, confident);
+  const template = TEMPLATES[templateKey];
+  const body = template.body;
+  const mode = `${templateKey}_ack`;
 
   try {
     const sent = await sendReply({
       to: ticket.from_email,
-      subject: ticket.subject || "(no subject)",
+      subject: template.subject, // fixed subject from the template
+      prefixRe: false,
       body,
       messageId: ticket.message_id,
       threadId: ticket.thread_id,
