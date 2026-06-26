@@ -11,9 +11,28 @@ let timer = null;
 let running = false;
 
 /**
- * Poll the support mailbox for UNSEEN messages and insert them as tickets.
- * Deduplicated on the Message-ID header, so re-running on the same email
- * is safe.
+ * Read/write the UID high-water mark in app_settings. We track the highest
+ * INBOX UID we've ingested rather than relying on the \Seen flag — otherwise
+ * any message read directly in Gmail would be skipped forever.
+ */
+async function getLastUid() {
+  const { rows } = await query(
+    "SELECT value FROM app_settings WHERE key = 'last_imap_uid'"
+  );
+  return rows.length ? parseInt(rows[0].value, 10) || 0 : 0;
+}
+async function setLastUid(uid) {
+  await query(
+    `INSERT INTO app_settings (key, value) VALUES ('last_imap_uid', $1)
+       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = now()`,
+    [String(uid)]
+  );
+}
+
+/**
+ * Poll the support INBOX and insert any messages newer than the last UID we
+ * processed, regardless of read/unread state. Deduplicated on Message-ID, so
+ * re-running on the same email is safe.
  */
 async function pollOnce() {
   if (running) return; // never overlap a slow poll
@@ -31,18 +50,40 @@ async function pollOnce() {
     await client.connect();
     const lock = await client.getMailboxLock("INBOX");
     try {
-      const unseen = await client.search({ seen: false });
-      if (!unseen || unseen.length === 0) return;
+      const lastUid = await getLastUid();
 
-      for (const seq of unseen) {
-        const msg = await client.fetchOne(seq, { source: true });
-        if (!msg?.source) continue;
-        const parsed = await simpleParser(msg.source);
-        await insertTicket(parsed);
-        // Mark seen so we don't re-ingest it next cycle.
-        await client.messageFlagsAdd(seq, ["\\Seen"]);
+      // First run: set the high-water mark at the current newest message so we
+      // don't re-ingest the whole mailbox (history is handled by the backfill).
+      if (lastUid === 0) {
+        const all = await client.search({ all: true }, { uid: true });
+        const maxUid = all && all.length ? Math.max(...all) : 0;
+        await setLastUid(maxUid);
+        console.log(`[EMAIL] initialized high-water UID = ${maxUid}`);
+        return;
       }
-      console.log(`[EMAIL] processed ${unseen.length} new message(s)`);
+
+      // Messages strictly newer than lastUid. The "N:*" form can return the
+      // highest message even when none qualify, so filter defensively.
+      const found = await client.search(
+        { uid: `${lastUid + 1}:*` },
+        { uid: true }
+      );
+      const fresh = (found || []).filter((u) => u > lastUid).sort((a, b) => a - b);
+      if (fresh.length === 0) return;
+
+      let maxUid = lastUid;
+      let n = 0;
+      for (const uid of fresh) {
+        const msg = await client.fetchOne(uid, { uid: true, source: true }, { uid: true });
+        if (msg?.source) {
+          const parsed = await simpleParser(msg.source);
+          await insertTicket(parsed);
+          n++;
+        }
+        if (uid > maxUid) maxUid = uid;
+      }
+      await setLastUid(maxUid);
+      console.log(`[EMAIL] processed ${n} new message(s) (uid ${lastUid + 1}..${maxUid})`);
     } finally {
       lock.release();
     }
@@ -58,7 +99,7 @@ async function pollOnce() {
   }
 }
 
-async function insertTicket(parsed) {
+export async function insertTicket(parsed) {
   const messageId = parsed.messageId || null;
   const threadId =
     parsed.inReplyTo ||
@@ -109,7 +150,7 @@ async function insertTicket(parsed) {
 
   // No row back => duplicate (ON CONFLICT). Only acknowledge genuinely new
   // tickets, so a customer is auto-replied to exactly once.
-  if (rows.length === 0) return;
+  if (rows.length === 0) return null;
 
   await maybeAutoReply(
     {
@@ -126,6 +167,8 @@ async function insertTicket(parsed) {
     },
     { isAutomated }
   );
+
+  return rows[0].id;
 }
 
 export function startEmailPoller() {
