@@ -27,6 +27,9 @@ const ALTERS = [
   "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_reply_confidence DOUBLE PRECISION",
   "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS auto_replied_at TIMESTAMPTZ",
   "ALTER TABLE ticket_replies ADD COLUMN IF NOT EXISTS cc VARCHAR(500)",
+  // IMAP UID of the source message — lets the queue backlog skip already-ingested mail
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS source_uid BIGINT",
+  "CREATE INDEX IF NOT EXISTS idx_tickets_source_uid ON tickets (source_uid)",
   // widen category from CHAR(1) to hold the new taxonomy codes
   "ALTER TABLE tickets ALTER COLUMN category TYPE VARCHAR(40)",
 ];

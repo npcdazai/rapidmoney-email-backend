@@ -13,6 +13,10 @@ export const config = {
     process.env.DATABASE_URL ||
     "postgresql://rpm_user:rpm_secure_2026@localhost:5432/rpm_crm",
 
+  // RabbitMQ — used to split mail ingestion into two queues: mail.new (live)
+  // and mail.old (historical backlog), drained by a separate worker process.
+  rabbitmqUrl: process.env.RABBITMQ_URL || "amqp://guest:guest@127.0.0.1:5672",
+
   // Gmail
   gmailEmail: process.env.GMAIL_EMAIL || "support@rapidmoney.in",
   gmailAppPassword: process.env.GMAIL_APP_PASSWORD || "",

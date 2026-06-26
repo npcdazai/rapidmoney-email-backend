@@ -1,11 +1,11 @@
 import { ImapFlow } from "imapflow";
-import { simpleParser } from "mailparser";
 import { config } from "../config.js";
 import { query } from "../db.js";
 import { slaHoursFor } from "../config.js";
 import { classify } from "./classifier.js";
 import { analyzeEmail } from "./aiClassifier.js";
 import { maybeAutoReply } from "./autoReply.js";
+import { publish, QUEUES } from "../queue/mq.js";
 
 let timer = null;
 let running = false;
@@ -30,9 +30,11 @@ async function setLastUid(uid) {
 }
 
 /**
- * Poll the support INBOX and insert any messages newer than the last UID we
- * processed, regardless of read/unread state. Deduplicated on Message-ID, so
- * re-running on the same email is safe.
+ * Poll the support INBOX for messages newer than the last UID we've seen and
+ * publish their UIDs to the mail.new queue (the worker fetches + ingests them).
+ * Tracks a UID high-water mark rather than the \Seen flag, so mail read in
+ * Gmail is never skipped. The high-water mark only advances after a successful
+ * enqueue, so a RabbitMQ outage just retries next cycle.
  */
 async function pollOnce() {
   if (running) return; // never overlap a slow poll
@@ -53,7 +55,7 @@ async function pollOnce() {
       const lastUid = await getLastUid();
 
       // First run: set the high-water mark at the current newest message so we
-      // don't re-ingest the whole mailbox (history is handled by the backfill).
+      // don't re-ingest the whole mailbox (history is handled by mail.old).
       if (lastUid === 0) {
         const all = await client.search({ all: true }, { uid: true });
         const maxUid = all && all.length ? Math.max(...all) : 0;
@@ -71,19 +73,13 @@ async function pollOnce() {
       const fresh = (found || []).filter((u) => u > lastUid).sort((a, b) => a - b);
       if (fresh.length === 0) return;
 
-      let maxUid = lastUid;
-      let n = 0;
+      // Enqueue first; only advance the high-water mark once all are published.
       for (const uid of fresh) {
-        const msg = await client.fetchOne(uid, { uid: true, source: true }, { uid: true });
-        if (msg?.source) {
-          const parsed = await simpleParser(msg.source);
-          await insertTicket(parsed);
-          n++;
-        }
-        if (uid > maxUid) maxUid = uid;
+        await publish(QUEUES.NEW, { uid });
       }
+      const maxUid = fresh[fresh.length - 1];
       await setLastUid(maxUid);
-      console.log(`[EMAIL] processed ${n} new message(s) (uid ${lastUid + 1}..${maxUid})`);
+      console.log(`[EMAIL] queued ${fresh.length} new message(s) -> ${QUEUES.NEW} (uid ${lastUid + 1}..${maxUid})`);
     } finally {
       lock.release();
     }
@@ -99,7 +95,8 @@ async function pollOnce() {
   }
 }
 
-export async function insertTicket(parsed) {
+export async function insertTicket(parsed, opts = {}) {
+  const { uid = null, allowAutoReply = true } = opts;
   const messageId = parsed.messageId || null;
   const threadId =
     parsed.inReplyTo ||
@@ -139,34 +136,37 @@ export async function insertTicket(parsed) {
   const { rows } = await query(
     `INSERT INTO tickets
        (message_id, thread_id, from_email, from_name, subject, body,
-        received_at, category, sub_category, sentiment_score, priority, status, sla_due_at)
+        received_at, category, sub_category, sentiment_score, priority, status, sla_due_at, source_uid)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'Open',
-             $7::timestamptz + ($12 || ' hours')::interval)
+             $7::timestamptz + ($12 || ' hours')::interval, $13)
      ON CONFLICT (message_id) DO NOTHING
      RETURNING id`,
     [messageId, threadId, fromEmail, fromName, subject, body, receivedAt,
-     code, subCategory, sentiment, priority, hours]
+     code, subCategory, sentiment, priority, hours, uid]
   );
 
   // No row back => duplicate (ON CONFLICT). Only acknowledge genuinely new
   // tickets, so a customer is auto-replied to exactly once.
   if (rows.length === 0) return null;
 
-  await maybeAutoReply(
-    {
-      id: rows[0].id,
-      from_email: fromEmail,
-      from_name: fromName,
-      subject,
-      body,
-      message_id: messageId,
-      thread_id: threadId,
-      category: code,
-      sub_category: subCategory,
-      priority,
-    },
-    { isAutomated }
-  );
+  // Historical backlog (mail.old) never auto-replies — only live mail does.
+  if (allowAutoReply) {
+    await maybeAutoReply(
+      {
+        id: rows[0].id,
+        from_email: fromEmail,
+        from_name: fromName,
+        subject,
+        body,
+        message_id: messageId,
+        thread_id: threadId,
+        category: code,
+        sub_category: subCategory,
+        priority,
+      },
+      { isAutomated }
+    );
+  }
 
   return rows[0].id;
 }
