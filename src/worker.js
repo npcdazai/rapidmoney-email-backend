@@ -21,10 +21,10 @@ async function startConsumer(label, queue, { prefetch, allowAutoReply }) {
     if (!msg) return;
     try {
       const { uid } = JSON.parse(msg.content.toString());
-      const source = await fetchSourceByUid(client, uid);
-      if (source) {
-        const parsed = await simpleParser(source);
-        await insertTicket(parsed, { uid, allowAutoReply });
+      const fetched = await fetchSourceByUid(client, uid);
+      if (fetched) {
+        const parsed = await simpleParser(fetched.source);
+        await insertTicket(parsed, { uid, allowAutoReply, isRead: fetched.seen });
       }
       channel.ack(msg);
     } catch (err) {

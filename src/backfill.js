@@ -26,11 +26,11 @@ try {
   const status = await client.status("INBOX", { messages: true });
   console.log(`[BACKFILL] INBOX has ${status.messages} messages — ingesting all`);
 
-  for await (const msg of client.fetch("1:*", { uid: true, source: true })) {
+  for await (const msg of client.fetch("1:*", { uid: true, source: true, flags: true })) {
     scanned++;
     try {
       const parsed = await simpleParser(msg.source);
-      const id = await insertTicket(parsed);
+      const id = await insertTicket(parsed, { isRead: !!msg.flags?.has("\\Seen") });
       if (id) inserted++;
       else skipped++;
     } catch (e) {

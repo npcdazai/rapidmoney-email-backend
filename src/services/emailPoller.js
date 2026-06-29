@@ -96,7 +96,7 @@ async function pollOnce() {
 }
 
 export async function insertTicket(parsed, opts = {}) {
-  const { uid = null, allowAutoReply = true } = opts;
+  const { uid = null, allowAutoReply = true, isRead = false } = opts;
   const messageId = parsed.messageId || null;
   const threadId =
     parsed.inReplyTo ||
@@ -136,13 +136,13 @@ export async function insertTicket(parsed, opts = {}) {
   const { rows } = await query(
     `INSERT INTO tickets
        (message_id, thread_id, from_email, from_name, subject, body,
-        received_at, category, sub_category, sentiment_score, priority, status, sla_due_at, source_uid)
+        received_at, category, sub_category, sentiment_score, priority, status, sla_due_at, source_uid, is_read)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'Open',
-             $7::timestamptz + ($12 || ' hours')::interval, $13)
+             $7::timestamptz + ($12 || ' hours')::interval, $13, $14)
      ON CONFLICT (message_id) DO NOTHING
      RETURNING id`,
     [messageId, threadId, fromEmail, fromName, subject, body, receivedAt,
-     code, subCategory, sentiment, priority, hours, uid]
+     code, subCategory, sentiment, priority, hours, uid, isRead]
   );
 
   // No row back => duplicate (ON CONFLICT). Only acknowledge genuinely new

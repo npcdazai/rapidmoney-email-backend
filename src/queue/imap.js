@@ -13,12 +13,14 @@ export function makeImapClient() {
   });
 }
 
-// Fetch the raw RFC822 source of a single message by UID.
+// Fetch the raw RFC822 source + read-state of a single message by UID.
+// Returns { source, seen } so the ingester can mirror Gmail's \Seen flag.
 export async function fetchSourceByUid(client, uid) {
   const lock = await client.getMailboxLock("INBOX");
   try {
-    const msg = await client.fetchOne(uid, { uid: true, source: true }, { uid: true });
-    return msg?.source || null;
+    const msg = await client.fetchOne(uid, { uid: true, source: true, flags: true }, { uid: true });
+    if (!msg?.source) return null;
+    return { source: msg.source, seen: !!msg.flags?.has("\\Seen") };
   } finally {
     lock.release();
   }
