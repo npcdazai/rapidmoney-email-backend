@@ -305,6 +305,10 @@ ticketsRouter.get("/", async (req, res, next) => {
     if (status) add("status = ?", status);
     if (priority) add("priority = ?", priority);
 
+    // Date-range filter on received_at (inclusive of the whole "to" day).
+    if (req.query.from) add("received_at >= ?::date", req.query.from);
+    if (req.query.to) add("received_at < (?::date + interval '1 day')", req.query.to);
+
     // Outlook-style smart folders
     if (req.query.inbox === "true")
       where.push("status NOT IN ('Resolved','Closed')");
@@ -335,6 +339,7 @@ ticketsRouter.get("/", async (req, res, next) => {
       `SELECT id, from_email, from_name, subject, received_at,
               category, priority, status, sla_due_at, sla_breached,
               is_read, flagged, auto_replied, created_at,
+              COUNT(*) OVER() AS total_count,
               LEFT(regexp_replace(COALESCE(body,''), '\\s+', ' ', 'g'), 160) AS snippet
          FROM tickets
          ${whereSql}
@@ -342,7 +347,10 @@ ticketsRouter.get("/", async (req, res, next) => {
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
-    res.json(rows);
+    const total = rows.length ? Number(rows[0].total_count) : 0;
+    // Strip the window-count helper column off each row before returning.
+    const items = rows.map(({ total_count, ...r }) => r);
+    res.json({ items, total, limit, offset });
   } catch (e) {
     next(e);
   }
