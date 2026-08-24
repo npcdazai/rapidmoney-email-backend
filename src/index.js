@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import { runMigrations } from "./migrate.js";
 import { loadSettings, getSettings, setAutoReplyEnabled } from "./settings.js";
 import { ticketsRouter } from "./routes/tickets.js";
+import { customersRouter } from "./routes/customers.js";
 import { authRouter } from "./routes/auth.js";
 import { authMiddleware, requireModule } from "./auth/middleware.js";
 import { startEmailPoller, stopEmailPoller } from "./services/emailPoller.js";
@@ -22,6 +23,7 @@ app.get("/health", (_req, res) =>
 
 app.use("/api/auth", authRouter);
 app.use("/api/tickets", authMiddleware, ticketsRouter);
+app.use("/api/customers", authMiddleware, customersRouter);
 
 // Runtime settings (auto-reply toggle). Any authenticated user may read the
 // state; only those allocated the Auto-reply module may change it.

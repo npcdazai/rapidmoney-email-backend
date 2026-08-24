@@ -29,6 +29,9 @@ export const config = {
   emailPollInterval: int(process.env.EMAIL_POLL_INTERVAL, 60), // seconds
   emailPollEnabled: (process.env.EMAIL_POLL_ENABLED || "true") === "true",
 
+  // Local timezone for date-range filtering (DB stores timestamptz in UTC).
+  appTimezone: process.env.APP_TIMEZONE || "Asia/Kolkata",
+
   // UAT sink — when set, ALL outbound email is redirected to this single
   // address instead of the real recipient (no customer is ever emailed).
   // Also bypasses the gmail-only allowlist so any test sender can be exercised.

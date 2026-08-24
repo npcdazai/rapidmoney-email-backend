@@ -5,6 +5,7 @@ import { slaHoursFor } from "../config.js";
 import { classify } from "./classifier.js";
 import { analyzeEmail } from "./aiClassifier.js";
 import { maybeAutoReply } from "./autoReply.js";
+import { detectPhones, matchCustomer } from "./customers.js";
 import { publish, QUEUES } from "../queue/mq.js";
 
 let timer = null;
@@ -133,16 +134,32 @@ export async function insertTicket(parsed, opts = {}) {
   }
   const hours = slaHoursFor(priority);
 
+  // 10-digit number detection (#4) + customer-master match (#6). Identify the
+  // sender against the master data by any mobile number in the mail, else email.
+  const phones = detectPhones(subject, body);
+  let customer = null;
+  try {
+    customer = await matchCustomer({ phones, email: fromEmail });
+  } catch (e) {
+    console.error(`[EMAIL] customer match failed: ${e.message}`);
+  }
+  const matchedPhone = phones[0] || customer?.phone || null;
+  // Concise issue summary (#8) — a cleaned snippet at ingest; the QRC auto-reply
+  // refines this with the AI one-line summary when it runs.
+  const querySummary = (body || subject || "").replace(/\s+/g, " ").trim().slice(0, 240) || null;
+
   const { rows } = await query(
     `INSERT INTO tickets
        (message_id, thread_id, from_email, from_name, subject, body,
-        received_at, category, sub_category, sentiment_score, priority, status, sla_due_at, source_uid, is_read)
+        received_at, category, sub_category, sentiment_score, priority, status, sla_due_at, source_uid, is_read,
+        customer_id, matched_phone, query_summary)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'Open',
-             $7::timestamptz + ($12 || ' hours')::interval, $13, $14)
+             $7::timestamptz + ($12 || ' hours')::interval, $13, $14, $15, $16, $17)
      ON CONFLICT (message_id) DO NOTHING
      RETURNING id`,
     [messageId, threadId, fromEmail, fromName, subject, body, receivedAt,
-     code, subCategory, sentiment, priority, hours, uid, isRead]
+     code, subCategory, sentiment, priority, hours, uid, isRead,
+     customer?.id || null, matchedPhone, querySummary]
   );
 
   // No row back => duplicate (ON CONFLICT). Only acknowledge genuinely new
@@ -163,6 +180,9 @@ export async function insertTicket(parsed, opts = {}) {
         category: code,
         sub_category: subCategory,
         priority,
+        received_at: receivedAt,
+        customer,
+        matched_phone: matchedPhone,
       },
       { isAutomated }
     );

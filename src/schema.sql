@@ -45,6 +45,30 @@ CREATE TABLE IF NOT EXISTS ticket_replies (
     sent_at     TIMESTAMPTZ DEFAULT now()
 );
 
+-- ───────────────────────── Customer master ─────────────────────────
+-- Imported from the "Customer Master" Excel/CSV. Used as the reference
+-- database to identify an emailing customer (by 10-digit mobile, LAN,
+-- application id, loan id, or email) and to personalize approved replies.
+CREATE TABLE IF NOT EXISTS customers (
+    id              SERIAL PRIMARY KEY,
+    lan             VARCHAR(60),                   -- Customer ID (LAN)
+    name            VARCHAR(255),
+    phone           VARCHAR(20),                   -- normalized 10-digit mobile
+    email           VARCHAR(255),
+    application_id  VARCHAR(60),
+    loan_id         VARCHAR(60),
+    lenders_name    VARCHAR(255),
+    extra           JSONB,                          -- any unmapped source columns
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    updated_at      TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+CREATE INDEX IF NOT EXISTS idx_customers_lan   ON customers(lan);
+CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(lower(email));
+CREATE INDEX IF NOT EXISTS idx_customers_app   ON customers(application_id);
+CREATE INDEX IF NOT EXISTS idx_customers_loan  ON customers(loan_id);
+
 -- runtime, UI-editable settings (key/value)
 CREATE TABLE IF NOT EXISTS app_settings (
     key        VARCHAR(60) PRIMARY KEY,

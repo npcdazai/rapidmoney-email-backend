@@ -32,6 +32,14 @@ const ALTERS = [
   "CREATE INDEX IF NOT EXISTS idx_tickets_source_uid ON tickets (source_uid)",
   // widen category from CHAR(1) to hold the new taxonomy codes
   "ALTER TABLE tickets ALTER COLUMN category TYPE VARCHAR(40)",
+  // ── Customer-master linkage + QRC workflow fields (QRC Email Automation) ──
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL",
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS matched_phone VARCHAR(20)", // 10-digit number detected in the email
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS query_summary TEXT", // concise, personalized issue summary
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS needs_manual_review BOOLEAN DEFAULT FALSE",
+  "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS manual_review_reason VARCHAR(160)",
+  "CREATE INDEX IF NOT EXISTS idx_tickets_customer ON tickets (customer_id)",
+  "CREATE INDEX IF NOT EXISTS idx_tickets_manual_review ON tickets (needs_manual_review)",
 ];
 
 // Map the legacy Q/R/C codes onto the new taxonomy.

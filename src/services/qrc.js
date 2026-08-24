@@ -214,6 +214,20 @@ export function pickTemplate(group, confident) {
   return "universal";
 }
 
+/**
+ * Personalize an approved template with verified customer information (#3, #7).
+ * Only the customer's own name from the master data is injected — never
+ * account-specific data — so the "never reveal account data over email"
+ * safety rule still holds. Replaces the fixed "Hello," greeting with
+ * "Hello <First Name>,"; a no-op when we have no verified name.
+ */
+export function personalize(body, customer) {
+  const name = (customer?.name || "").trim();
+  if (!name) return body;
+  const first = name.split(/\s+/)[0];
+  return body.replace(/^Hello,/, `Hello ${first},`);
+}
+
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // Optional internal alert to the owning team (not the customer).

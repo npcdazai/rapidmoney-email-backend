@@ -83,6 +83,8 @@ ticketsRouter.get("/folders", async (_req, res, next) => {
         COUNT(*) FILTER (WHERE sla_breached = TRUE AND status NOT IN ('Resolved','Closed')) AS breached_total,
         COUNT(*) FILTER (WHERE auto_replied = TRUE)                    AS auto_replied_total,
         COUNT(*) FILTER (WHERE auto_replied = TRUE AND is_read = FALSE) AS auto_replied_unread,
+        COUNT(*) FILTER (WHERE needs_manual_review = TRUE AND status NOT IN ('Resolved','Closed')) AS manual_review_total,
+        COUNT(*) FILTER (WHERE needs_manual_review = TRUE AND status NOT IN ('Resolved','Closed') AND is_read = FALSE) AS manual_review_unread,
         COUNT(*) FILTER (WHERE category IS NULL)                       AS uncategorized_total
       FROM tickets
     `);
@@ -305,9 +307,14 @@ ticketsRouter.get("/", async (req, res, next) => {
     if (status) add("status = ?", status);
     if (priority) add("priority = ?", priority);
 
-    // Date-range filter on received_at (inclusive of the whole "to" day).
-    if (req.query.from) add("received_at >= ?::date", req.query.from);
-    if (req.query.to) add("received_at < (?::date + interval '1 day')", req.query.to);
+    // Date-range filter on received_at, compared in the app's local timezone
+    // (received_at is timestamptz in UTC; users pick dates in local/IST time).
+    // Both bounds are inclusive of the whole local day.
+    const tz = config.appTimezone;
+    if (req.query.from)
+      add(`(received_at AT TIME ZONE '${tz}')::date >= ?::date`, req.query.from);
+    if (req.query.to)
+      add(`(received_at AT TIME ZONE '${tz}')::date <= ?::date`, req.query.to);
 
     // Outlook-style smart folders
     if (req.query.inbox === "true")
@@ -316,6 +323,8 @@ ticketsRouter.get("/", async (req, res, next) => {
       where.push("sla_breached = TRUE AND status NOT IN ('Resolved','Closed')");
     if (req.query.flagged === "true") where.push("flagged = TRUE");
     if (req.query.auto_replied === "true") where.push("auto_replied = TRUE");
+    if (req.query.manual_review === "true")
+      where.push("needs_manual_review = TRUE AND status NOT IN ('Resolved','Closed')");
     if (req.query.unread === "true") where.push("is_read = FALSE");
     if (req.query.uncategorized === "true") where.push("category IS NULL");
     // QRC group filter → member categories
@@ -371,7 +380,7 @@ ticketsRouter.get("/:id", async (req, res, next) => {
       await query(`UPDATE tickets SET is_read = TRUE WHERE id = $1`, [ticket.id]);
       ticket.is_read = true;
     }
-    const [{ rows: notes }, { rows: replies }] = await Promise.all([
+    const [{ rows: notes }, { rows: replies }, { rows: cust }] = await Promise.all([
       query(
         `SELECT id, note, is_internal, created_by, created_at
            FROM ticket_notes WHERE ticket_id = $1 ORDER BY created_at`,
@@ -382,8 +391,11 @@ ticketsRouter.get("/:id", async (req, res, next) => {
            FROM ticket_replies WHERE ticket_id = $1 ORDER BY sent_at`,
         [ticket.id]
       ),
+      ticket.customer_id
+        ? query(`SELECT * FROM customers WHERE id = $1`, [ticket.customer_id])
+        : Promise.resolve({ rows: [] }),
     ]);
-    res.json({ ...ticket, notes, replies });
+    res.json({ ...ticket, notes, replies, customer: cust[0] || null });
   } catch (e) {
     next(e);
   }

@@ -24,6 +24,7 @@ import {
   internalAlert,
   TEMPLATES,
   pickTemplate,
+  personalize,
 } from "./qrc.js";
 
 // Senders we must never auto-reply to (mail-loop / bounce protection).
@@ -37,6 +38,10 @@ const firstName = (name = "", email = "") => {
 };
 
 const CONFIDENCE_FLOOR = 0.75;
+
+// Duplicate-response prevention window (#5): suppress re-sending the same
+// approved answer to the same customer/issue within this many days.
+const DUP_WINDOW_DAYS = Number(process.env.DUP_REPLY_WINDOW_DAYS) || 7;
 
 /**
  * Decide on and send a QRC auto-reply for a ticket. Returns true if sent.
@@ -82,10 +87,58 @@ export async function maybeAutoReply(ticket, opts = {}) {
   const confident = (qrc.confidence ?? 0.9) >= CONFIDENCE_FLOOR;
   const ref = makeReference(ticket.received_at, ticket.id);
 
-  // Pick the fixed customer template (low confidence → universal catch-all).
+  // Resolve the matched customer (passed on ingest, else load by id) so the
+  // reply can be personalized with verified customer information (#3, #7).
+  const custId = ticket.customer?.id ?? ticket.customer_id ?? null;
+  let customer = ticket.customer || null;
+  if (!customer && custId) {
+    const c = await query(`SELECT * FROM customers WHERE id = $1`, [custId]);
+    customer = c.rows[0] || null;
+  }
+
+  // Duplicate-response prevention (#5): never send the same approved answer to
+  // the same customer for the same issue within the window. Matches on the
+  // sender's email or their master-data customer id.
+  if (!force) {
+    const dup = await query(
+      `SELECT 1 FROM tickets
+         WHERE id <> $1 AND auto_replied = TRUE AND auto_reply_subcat = $2
+           AND (from_email = $3 OR ($4::int IS NOT NULL AND customer_id = $4))
+           AND auto_replied_at > now() - ($5 || ' days')::interval
+         LIMIT 1`,
+      [ticket.id, qrc.subKey, ticket.from_email, custId, String(DUP_WINDOW_DAYS)]
+    );
+    if (dup.rows.length) {
+      await query(
+        `INSERT INTO ticket_notes (ticket_id, note, is_internal, created_by) VALUES ($1,$2,TRUE,$3)`,
+        [
+          ticket.id,
+          `QRC auto-reply skipped — the same ${group}/${qrc.subKey} answer was already sent to this customer within ${DUP_WINDOW_DAYS} days (duplicate-response prevention).`,
+          "System",
+        ]
+      );
+      console.log(`[AUTO-REPLY] skipped #${ticket.id} — duplicate ${group}/${qrc.subKey} for ${ticket.from_email}`);
+      return false;
+    }
+  }
+
+  // Manual-review flagging (#9): when the classifier is not confident enough to
+  // pick an approved template, or the query needs identity-verified account
+  // data, send the approved acknowledgement AND flag for a human — never invent
+  // an unapproved answer.
+  const accountSpecific = group === "query" && !!sub.accountSpecific;
+  const needsManual = !confident || accountSpecific;
+  const manualReason = !confident
+    ? "Low confidence — no approved template sufficiently matched; needs manual review"
+    : accountSpecific
+      ? "Account-specific query — requires identity-verified manual handling"
+      : null;
+
+  // Pick the fixed approved template (low confidence → universal catch-all) and
+  // personalize it with the verified customer name.
   const templateKey = pickTemplate(group, confident);
   const template = TEMPLATES[templateKey];
-  const body = template.body;
+  const body = personalize(template.body, customer);
   const mode = `${templateKey}_ack`;
 
   try {
@@ -108,15 +161,20 @@ export async function maybeAutoReply(ticket, opts = {}) {
       `UPDATE tickets
           SET auto_replied = TRUE, reference = $2, auto_replied_at = now(),
               auto_reply_mode = $3, auto_reply_group = $4, auto_reply_subcat = $5,
-              auto_reply_routed_to = $6, auto_reply_confidence = $7, updated_at = now()
+              auto_reply_routed_to = $6, auto_reply_confidence = $7,
+              needs_manual_review = $8, manual_review_reason = $9,
+              query_summary = COALESCE($10, query_summary), updated_at = now()
         WHERE id = $1`,
-      [ticket.id, ref, mode, group, qrc.subKey, sub.routedTo, qrc.confidence ?? 0.9]
+      [ticket.id, ref, mode, group, qrc.subKey, sub.routedTo, qrc.confidence ?? 0.9,
+       needsManual, manualReason, qrc.summary || null]
     );
     await query(
       `INSERT INTO ticket_notes (ticket_id, note, is_internal, created_by) VALUES ($1,$2,TRUE,$3)`,
       [
         ticket.id,
-        `QRC auto-reply: ${group}/${qrc.subKey} → ${mode} (ref ${ref}, conf ${(qrc.confidence ?? 0.9).toFixed(2)}). Routed to ${sub.routedTo}.`,
+        `QRC auto-reply: ${group}/${qrc.subKey} → ${mode} (ref ${ref}, conf ${(qrc.confidence ?? 0.9).toFixed(2)}). Routed to ${sub.routedTo}.` +
+          (customer ? ` Matched customer ${customer.name || customer.lan || customer.phone || customer.id} (by ${customer._matched_by || "id"}).` : " No customer-master match.") +
+          (needsManual ? ` FLAGGED for manual review: ${manualReason}.` : ""),
         "System",
       ]
     );
