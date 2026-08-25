@@ -40,6 +40,8 @@ const ALTERS = [
   "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS manual_review_reason VARCHAR(160)",
   "CREATE INDEX IF NOT EXISTS idx_tickets_customer ON tickets (customer_id)",
   "CREATE INDEX IF NOT EXISTS idx_tickets_manual_review ON tickets (needs_manual_review)",
+  // manual QRC entries — rich-text response column added later
+  "ALTER TABLE customer_entries ADD COLUMN IF NOT EXISTS responded_to_customer TEXT",
 ];
 
 // Map the legacy Q/R/C codes onto the new taxonomy.

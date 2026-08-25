@@ -69,6 +69,22 @@ CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(lower(email));
 CREATE INDEX IF NOT EXISTS idx_customers_app   ON customers(application_id);
 CREATE INDEX IF NOT EXISTS idx_customers_loan  ON customers(loan_id);
 
+-- Manually-entered QRC rows for a customer (the Support-sheet columns typed by
+-- an agent in the customer modal, for cases with no auto-matched mail).
+CREATE TABLE IF NOT EXISTS customer_entries (
+    id             SERIAL PRIMARY KEY,
+    customer_id    INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    complain_date  DATE,                          -- date of the mail
+    type_of_mail   VARCHAR(20),                   -- Query / Request / Complaint
+    customer_query TEXT,                           -- rich text (HTML)
+    response_date  DATE,                          -- when we responded
+    responded_to_customer TEXT,                    -- rich text (HTML)
+    created_by     VARCHAR(120),
+    created_at     TIMESTAMPTZ DEFAULT now(),
+    updated_at     TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_customer_entries_cust ON customer_entries(customer_id);
+
 -- runtime, UI-editable settings (key/value)
 CREATE TABLE IF NOT EXISTS app_settings (
     key        VARCHAR(60) PRIMARY KEY,

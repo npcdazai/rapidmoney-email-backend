@@ -9,6 +9,7 @@
 // customer master (#6) and customer matching used by the workflow (#10).
 
 import * as XLSX from "xlsx";
+import { readFileSync } from "node:fs";
 import { query } from "../db.js";
 
 // ───────────────────────── 10-digit number detection ─────────────────────────
@@ -116,7 +117,24 @@ function buildHeaderMap(headers) {
  * @returns {{records: object[], skipped: number, headers: string[]}}
  */
 export function parseWorkbook(buffer) {
-  const wb = XLSX.read(buffer, { type: "buffer" });
+  // `dense: true` stores rows as arrays instead of a cell-address map, which
+  // uses far less memory on large sheets.
+  return workbookToRecords(XLSX.read(buffer, { type: "buffer", dense: true }));
+}
+
+/**
+ * Parse a workbook straight from a file on disk. Preferred for large uploads —
+ * the request body is streamed to a temp file rather than held in memory.
+ * @returns {{records: object[], skipped: number, headers: string[]}}
+ */
+export function parseWorkbookFile(path) {
+  // The xlsx ESM build has no bound fs, so read the bytes ourselves. The upload
+  // was already streamed to disk (low memory during transfer); parsing then
+  // holds one buffer + the sheet, backed by swap for very large workbooks.
+  return workbookToRecords(XLSX.read(readFileSync(path), { type: "buffer", dense: true }));
+}
+
+function workbookToRecords(wb) {
   const sheet = wb.Sheets[wb.SheetNames[0]];
   if (!sheet) return { records: [], skipped: 0, headers: [] };
   const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false, defval: "" });
@@ -153,53 +171,117 @@ export function parseWorkbook(buffer) {
   return { records, skipped, headers };
 }
 
+const IMPORT_COLS = ["lan", "name", "phone", "email", "application_id", "loan_id", "lenders_name"];
+const CHUNK = 2000; // rows per bulk statement (well under Postgres' 65535-param cap)
+
+const extraJson = (rec) =>
+  rec.extra && Object.keys(rec.extra).length ? JSON.stringify(rec.extra) : null;
+
 /**
  * Upsert customer records. A record updates an existing customer when it shares
  * a LAN (preferred) or a phone; otherwise it is inserted. Only non-empty
  * incoming fields overwrite existing values, so partial sheets don't wipe data.
+ *
+ * Batched for large sheets: incoming rows are merged by LAN/phone, routed to
+ * INSERT vs UPDATE against a one-time snapshot of existing keys, then written
+ * in bulk multi-row statements (~2 orders of magnitude faster than per-row).
  * @returns {{inserted: number, updated: number}}
  */
 export async function importRows(records) {
-  let inserted = 0,
-    updated = 0;
+  if (!records.length) return { inserted: 0, updated: 0 };
+
+  // 1) Merge duplicate rows within the import (same LAN, else same phone), so a
+  //    single sheet never inserts the same customer twice. Later non-empty wins.
+  const byLan = new Map();
+  const byPhone = new Map();
+  const merged = [];
+  const mergeInto = (dst, rec) => {
+    for (const c of IMPORT_COLS) if (rec[c] != null && rec[c] !== "") dst[c] = rec[c];
+    if (rec.extra && Object.keys(rec.extra).length) dst.extra = { ...(dst.extra || {}), ...rec.extra };
+  };
   for (const rec of records) {
-    const extra = rec.extra && Object.keys(rec.extra).length ? JSON.stringify(rec.extra) : null;
-
-    // Find an existing row to update (LAN first, then phone).
-    let existing = null;
-    if (rec.lan) {
-      const { rows } = await query(`SELECT id FROM customers WHERE lan = $1 LIMIT 1`, [rec.lan]);
-      existing = rows[0] || null;
+    let target =
+      (rec.lan && byLan.get(rec.lan)) || (rec.phone && byPhone.get(rec.phone)) || null;
+    if (!target) {
+      target = { lan: null, name: null, phone: null, email: null, application_id: null, loan_id: null, lenders_name: null, extra: {} };
+      merged.push(target);
     }
-    if (!existing && rec.phone) {
-      const { rows } = await query(`SELECT id FROM customers WHERE phone = $1 LIMIT 1`, [rec.phone]);
-      existing = rows[0] || null;
-    }
+    mergeInto(target, rec);
+    if (target.lan) byLan.set(target.lan, target);
+    if (target.phone) byPhone.set(target.phone, target);
+  }
 
-    if (existing) {
-      await query(
-        `UPDATE customers SET
-           lan            = COALESCE($2, lan),
-           name           = COALESCE($3, name),
-           phone          = COALESCE($4, phone),
-           email          = COALESCE($5, email),
-           application_id = COALESCE($6, application_id),
-           loan_id        = COALESCE($7, loan_id),
-           lenders_name   = COALESCE($8, lenders_name),
-           extra          = COALESCE($9::jsonb, extra),
-           updated_at     = now()
-         WHERE id = $1`,
-        [existing.id, rec.lan, rec.name, rec.phone, rec.email, rec.application_id, rec.loan_id, rec.lenders_name, extra]
-      );
-      updated++;
-    } else {
-      await query(
-        `INSERT INTO customers (lan, name, phone, email, application_id, loan_id, lenders_name, extra)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`,
-        [rec.lan, rec.name, rec.phone, rec.email, rec.application_id, rec.loan_id, rec.lenders_name, extra]
-      );
-      inserted++;
+  // 2) Snapshot existing keys once, then route each merged row to insert/update.
+  const existLan = new Map();
+  const existPhone = new Map();
+  {
+    const { rows } = await query(`SELECT id, lan, phone FROM customers`);
+    for (const r of rows) {
+      if (r.lan) existLan.set(r.lan, r.id);
+      if (r.phone && !existPhone.has(r.phone)) existPhone.set(r.phone, r.id);
     }
   }
+  const inserts = [];
+  const updates = [];
+  for (const rec of merged) {
+    const id =
+      (rec.lan && existLan.get(rec.lan)) || (rec.phone && existPhone.get(rec.phone)) || null;
+    if (id) updates.push({ id, rec });
+    else inserts.push(rec);
+  }
+
+  let inserted = 0;
+  let updated = 0;
+
+  // 3) Bulk INSERT new rows.
+  for (let i = 0; i < inserts.length; i += CHUNK) {
+    const slice = inserts.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    slice.forEach((rec, idx) => {
+      const b = idx * 8;
+      values.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8}::jsonb)`);
+      params.push(rec.lan, rec.name, rec.phone, rec.email, rec.application_id, rec.loan_id, rec.lenders_name, extraJson(rec));
+    });
+    await query(
+      `INSERT INTO customers (lan, name, phone, email, application_id, loan_id, lenders_name, extra)
+       VALUES ${values.join(",")}`,
+      params
+    );
+    inserted += slice.length;
+  }
+
+  // 4) Bulk UPDATE existing rows via UPDATE ... FROM (VALUES ...). COALESCE keeps
+  //    the current value when the incoming field is empty.
+  for (let i = 0; i < updates.length; i += CHUNK) {
+    const slice = updates.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    slice.forEach(({ id, rec }, idx) => {
+      const b = idx * 9;
+      values.push(
+        `($${b + 1}::int,$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9}::jsonb)`
+      );
+      params.push(id, rec.lan, rec.name, rec.phone, rec.email, rec.application_id, rec.loan_id, rec.lenders_name, extraJson(rec));
+    });
+    await query(
+      `UPDATE customers c SET
+         lan            = COALESCE(v.lan, c.lan),
+         name           = COALESCE(v.name, c.name),
+         phone          = COALESCE(v.phone, c.phone),
+         email          = COALESCE(v.email, c.email),
+         application_id = COALESCE(v.application_id, c.application_id),
+         loan_id        = COALESCE(v.loan_id, c.loan_id),
+         lenders_name   = COALESCE(v.lenders_name, c.lenders_name),
+         extra          = COALESCE(v.extra, c.extra),
+         updated_at     = now()
+       FROM (VALUES ${values.join(",")})
+         AS v(id, lan, name, phone, email, application_id, loan_id, lenders_name, extra)
+       WHERE c.id = v.id`,
+      params
+    );
+    updated += slice.length;
+  }
+
   return { inserted, updated };
 }
