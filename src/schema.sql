@@ -85,6 +85,18 @@ CREATE TABLE IF NOT EXISTS customer_entries (
 );
 CREATE INDEX IF NOT EXISTS idx_customer_entries_cust ON customer_entries(customer_id);
 
+-- User-created reply templates (managed in the Templates section, inserted
+-- into the reply composer). Body is rich text (HTML).
+CREATE TABLE IF NOT EXISTS templates (
+    id          SERIAL PRIMARY KEY,
+    name        VARCHAR(160) NOT NULL,
+    subject     TEXT,
+    body        TEXT,
+    created_by  VARCHAR(120),
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
 -- runtime, UI-editable settings (key/value)
 CREATE TABLE IF NOT EXISTS app_settings (
     key        VARCHAR(60) PRIMARY KEY,
