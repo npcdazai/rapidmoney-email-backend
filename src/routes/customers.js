@@ -201,6 +201,55 @@ customersRouter.get("/queries", requireModule(...MAIL_SECTIONS), async (req, res
   }
 });
 
+// POST /api/customers/import-stream — upload a workbook, parse it on the server
+// (handles very large files the browser can't), insert in chunks, and stream
+// NDJSON progress lines so the UI can show a real progress bar.
+customersRouter.post("/import-stream", requireModule("autoreply"), async (req, res, next) => {
+  const tmp = join(tmpdir(), `cust-import-${randomUUID()}`);
+  const CHUNK = 5000;
+  try {
+    // 1) Stream the upload to a temp file (never buffered whole in memory).
+    await new Promise((resolve, reject) => {
+      const ws = createWriteStream(tmp);
+      req.on("error", reject);
+      ws.on("error", reject);
+      ws.on("finish", resolve);
+      req.pipe(ws);
+    });
+
+    // 2) Begin the NDJSON progress stream, then parse (blocking, so flush first).
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-cache");
+    res.write(JSON.stringify({ phase: "parsing" }) + "\n");
+    await new Promise((r) => setImmediate(r));
+
+    const { records, skipped, headers, detectedCols } = parseWorkbookFile(tmp);
+    const total = records.length;
+    res.write(JSON.stringify({ phase: "importing", done: 0, total, inserted: 0, updated: 0 }) + "\n");
+
+    // 3) Insert in chunks, emitting progress after each.
+    let inserted = 0, updated = 0;
+    for (let i = 0; i < total; i += CHUNK) {
+      const r = await importRows(records.slice(i, i + CHUNK));
+      inserted += r.inserted;
+      updated += r.updated;
+      res.write(JSON.stringify({ phase: "importing", done: Math.min(i + CHUNK, total), total, inserted, updated }) + "\n");
+    }
+
+    res.write(JSON.stringify({ summary: true, done: total, total, inserted, updated, skipped, headers, detectedCols }) + "\n");
+    res.end();
+  } catch (e) {
+    console.error(`[customers/import-stream] ${e.message}`);
+    if (!res.headersSent) return next(e);
+    try {
+      res.write(JSON.stringify({ error: e.message }) + "\n");
+      res.end();
+    } catch { /* client gone */ }
+  } finally {
+    await unlink(tmp).catch(() => {});
+  }
+});
+
 // GET /api/customers/lenders — distinct lender values (with counts) for the
 // table's Lender filter dropdown.
 customersRouter.get("/lenders", requireModule(...MAIL_SECTIONS), async (_req, res, next) => {

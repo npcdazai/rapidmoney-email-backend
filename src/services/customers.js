@@ -88,28 +88,28 @@ export async function matchCustomer({ phones = [], lan, applicationId, loanId, e
 // spaces/underscores/punctuation, so "Customer ID (LAN)", "customer_id",
 // "LAN" all map to `lan`.
 const HEADER_ALIASES = {
-  lan: ["lan", "customerid", "customeridlan", "customerlan", "cust id", "custid"],
-  name: ["name", "customername", "custname", "fullname"],
-  phone: ["phone", "contactno", "contact", "mobile", "mobileno", "contactnumber", "phoneno"],
-  email: ["email", "emaildetails", "emailid", "emailaddress", "mail"],
-  application_id: ["applicationid", "appid", "applicationno", "appno"],
-  loan_id: ["loanid", "loanno", "loanaccount", "loanaccountno"],
-  lenders_name: ["lendersname", "lender", "lendername", "lenders", "nbfc", "lendingpartner"],
+  lan: ["lan", "lanno", "lanid", "customerid", "customeridlan", "customerlan", "cust id", "custid", "customercode", "loanaccountnumber", "customerlanid"],
+  name: ["name", "customername", "custname", "fullname", "applicantname", "borrowername", "customerfullname"],
+  phone: ["phone", "contactno", "contact", "mobile", "mobileno", "mobilenumber", "contactnumber", "phoneno", "phonenumber", "registeredmobile", "registeredmobileno", "registeredmobilenumber", "customermobile", "customercontact", "mobileno"],
+  email: ["email", "emaildetails", "emailid", "emailaddress", "mail", "customeremail", "emailidofcustomer", "emailaddressid"],
+  application_id: ["applicationid", "appid", "applicationno", "appno", "applicationnumber", "loanapplicationid", "loanapplicationno", "leadid", "lead", "leadno"],
+  loan_id: ["loanid", "loanno", "loanaccount", "loanaccountno", "loannumber", "loanaccountnumber", "lenderloannumber", "lenderloanno", "lenderloanid"],
+  lenders_name: ["lendersname", "lender", "lendername", "lenders", "nbfc", "nbfcname", "lendingpartner", "lendingpartnername", "partnername", "financer", "financier"],
 };
 
 const canon = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
 
-function buildHeaderMap(headers) {
-  const map = {}; // sourceIndex -> canonical column (or "extra:<orig>")
-  const aliasLookup = {};
+// Precompute canonical-alias → canonical-column lookup once.
+const ALIAS_LOOKUP = (() => {
+  const m = {};
   for (const [col, aliases] of Object.entries(HEADER_ALIASES))
-    for (const a of aliases) aliasLookup[canon(a)] = col;
-  headers.forEach((h, i) => {
-    const key = canon(h);
-    map[i] = aliasLookup[key] || `extra:${String(h).trim()}`;
-  });
-  return map;
-}
+    for (const a of aliases) m[canon(a)] = col;
+  return m;
+})();
+
+// Score a row by how many of its cells look like known column headers.
+const headerScore = (row = []) =>
+  row.reduce((n, cell) => n + (ALIAS_LOOKUP[canon(String(cell))] ? 1 : 0), 0);
 
 /**
  * Parse a workbook buffer (xlsx/xls/csv) into normalized customer records.
@@ -134,18 +134,46 @@ export function parseWorkbookFile(path) {
   return workbookToRecords(XLSX.read(readFileSync(path), { type: "buffer", dense: true }));
 }
 
+// Pick the first sheet that yields usable rows; fall back to the first sheet's
+// headers for diagnostics when none do. Handles workbooks whose data lives on a
+// later tab (e.g. "Support" / "Ruloans" / "Sheet2").
 function workbookToRecords(wb) {
-  const sheet = wb.Sheets[wb.SheetNames[0]];
-  if (!sheet) return { records: [], skipped: 0, headers: [] };
-  const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false, defval: "" });
-  if (grid.length < 2) return { records: [], skipped: 0, headers: grid[0] || [] };
+  let firstHeaders = [];
+  let firstDetected = [];
+  for (const name of wb.SheetNames || []) {
+    const out = sheetToRecords(wb.Sheets[name]);
+    if (!firstHeaders.length && out.headers.length) {
+      firstHeaders = out.headers;
+      firstDetected = out.detectedCols;
+    }
+    if (out.records.length) return { ...out, sheet: name };
+  }
+  return { records: [], skipped: 0, headers: firstHeaders, detectedCols: firstDetected };
+}
 
-  const headers = grid[0].map((h) => String(h).trim());
-  const hmap = buildHeaderMap(headers);
+function sheetToRecords(sheet) {
+  if (!sheet) return { records: [], skipped: 0, headers: [], detectedCols: [] };
+  const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false, defval: "" });
+  if (!grid.length) return { records: [], skipped: 0, headers: [], detectedCols: [] };
+
+  // Auto-detect the header row: reports often have title/metadata rows on top,
+  // so pick the row (within the first 10) that matches the most known columns.
+  const scan = Math.min(10, grid.length);
+  let headerRow = 0, best = -1;
+  for (let r = 0; r < scan; r++) {
+    const score = headerScore(grid[r]);
+    if (score > best) { best = score; headerRow = r; }
+  }
+
+  const headers = (grid[headerRow] || []).map((h) => String(h).trim());
+  const hmap = {}; // col index -> canonical column | "extra:<orig>"
+  headers.forEach((h, i) => { hmap[i] = ALIAS_LOOKUP[canon(h)] || `extra:${h}`; });
+  const detectedCols = [...new Set(Object.values(hmap).filter((v) => !v.startsWith("extra:")))];
+
   const records = [];
   let skipped = 0;
 
-  for (let r = 1; r < grid.length; r++) {
+  for (let r = headerRow + 1; r < grid.length; r++) {
     const row = grid[r];
     const rec = { lan: null, name: null, phone: null, email: null, application_id: null, loan_id: null, lenders_name: null, extra: {} };
     for (let c = 0; c < row.length; c++) {
@@ -168,7 +196,7 @@ function workbookToRecords(wb) {
     }
     records.push(rec);
   }
-  return { records, skipped, headers };
+  return { records, skipped, headers, detectedCols };
 }
 
 const IMPORT_COLS = ["lan", "name", "phone", "email", "application_id", "loan_id", "lenders_name"];
@@ -211,11 +239,16 @@ export async function importRows(records) {
     if (target.phone) byPhone.set(target.phone, target);
   }
 
-  // 2) Snapshot existing keys once, then route each merged row to insert/update.
+  // 2) Snapshot existing keys for just the incoming records (scoped so a single
+  //    chunk of a large import doesn't scan the whole table).
   const existLan = new Map();
   const existPhone = new Map();
   {
-    const { rows } = await query(`SELECT id, lan, phone FROM customers`);
+    const { rows } = await query(
+      `SELECT id, lan, phone FROM customers
+        WHERE lan = ANY($1::text[]) OR phone = ANY($2::text[])`,
+      [[...byLan.keys()], [...byPhone.keys()]]
+    );
     for (const r of rows) {
       if (r.lan) existLan.set(r.lan, r.id);
       if (r.phone && !existPhone.has(r.phone)) existPhone.set(r.phone, r.id);
