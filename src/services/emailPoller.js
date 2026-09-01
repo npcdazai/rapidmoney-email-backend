@@ -38,8 +38,9 @@ async function setLastUid(uid) {
  * enqueue, so a RabbitMQ outage just retries next cycle.
  */
 async function pollOnce() {
-  if (running) return; // never overlap a slow poll
+  if (running) return -1; // a poll is already in progress
   running = true;
+  let queued = 0;
 
   const client = new ImapFlow({
     host: config.imapHost,
@@ -62,7 +63,7 @@ async function pollOnce() {
         const maxUid = all && all.length ? Math.max(...all) : 0;
         await setLastUid(maxUid);
         console.log(`[EMAIL] initialized high-water UID = ${maxUid}`);
-        return;
+        return 0;
       }
 
       // Messages strictly newer than lastUid. The "N:*" form can return the
@@ -72,7 +73,7 @@ async function pollOnce() {
         { uid: true }
       );
       const fresh = (found || []).filter((u) => u > lastUid).sort((a, b) => a - b);
-      if (fresh.length === 0) return;
+      if (fresh.length === 0) return 0;
 
       // Enqueue first; only advance the high-water mark once all are published.
       for (const uid of fresh) {
@@ -80,12 +81,14 @@ async function pollOnce() {
       }
       const maxUid = fresh[fresh.length - 1];
       await setLastUid(maxUid);
+      queued = fresh.length;
       console.log(`[EMAIL] queued ${fresh.length} new message(s) -> ${QUEUES.NEW} (uid ${lastUid + 1}..${maxUid})`);
     } finally {
       lock.release();
     }
   } catch (err) {
     console.error(`[EMAIL] poll error: ${err.message}`);
+    queued = null; // signal failure to a manual sync caller (interval poller ignores it)
   } finally {
     try {
       await client.logout();
@@ -94,6 +97,15 @@ async function pollOnce() {
     }
     running = false;
   }
+  return queued;
+}
+
+/**
+ * Manually trigger an inbox poll now (used by the "Sync Mail" button). Returns
+ * the number of new messages queued (-1 if a poll was already running).
+ */
+export async function triggerMailSync() {
+  return pollOnce();
 }
 
 export async function insertTicket(parsed, opts = {}) {

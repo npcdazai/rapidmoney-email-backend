@@ -99,6 +99,9 @@ const HEADER_ALIASES = {
 
 const canon = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
 
+// Placeholder values that mean "empty" in the source sheets.
+const NA_RE = /^(n\.?\/?a\.?|na|nil|null|none|-+|\.+)$/i;
+
 // Precompute canonical-alias → canonical-column lookup once.
 const ALIAS_LOOKUP = (() => {
   const m = {};
@@ -186,7 +189,8 @@ function sheetToRecords(sheet) {
       } else if (target === "phone") {
         rec.phone = normalizePhone(val || "");
       } else {
-        rec[target] = val;
+        // Treat "N/A" / "NA" / "-" etc. as empty so they don't become identifiers.
+        rec[target] = val && !NA_RE.test(val) ? val : null;
       }
     }
     // A usable record needs at least one identifier to match on later.
@@ -206,59 +210,72 @@ const extraJson = (rec) =>
   rec.extra && Object.keys(rec.extra).length ? JSON.stringify(rec.extra) : null;
 
 /**
- * Upsert customer records. A record updates an existing customer when it shares
- * a LAN (preferred) or a phone; otherwise it is inserted. Only non-empty
- * incoming fields overwrite existing values, so partial sheets don't wipe data.
+ * Upsert customer records — one row per ENTRY. The identity key is Application
+ * ID when present (so every application of a customer is kept as its own row),
+ * otherwise LAN, otherwise phone. Re-importing the same sheet updates in place
+ * (no duplicates); only non-empty incoming fields overwrite existing values.
  *
- * Batched for large sheets: incoming rows are merged by LAN/phone, routed to
- * INSERT vs UPDATE against a one-time snapshot of existing keys, then written
- * in bulk multi-row statements (~2 orders of magnitude faster than per-row).
+ * Batched for large sheets: incoming rows are merged by key, routed to INSERT
+ * vs UPDATE against a one-time scoped snapshot, then written in bulk multi-row
+ * statements.
  * @returns {{inserted: number, updated: number}}
  */
+// Identity key: Application ID first (per-entry), then LAN, then phone.
+const rowKey = (r) =>
+  r.application_id ? `a:${r.application_id}` : r.lan ? `l:${r.lan}` : r.phone ? `p:${r.phone}` : null;
+
 export async function importRows(records) {
   if (!records.length) return { inserted: 0, updated: 0 };
 
-  // 1) Merge duplicate rows within the import (same LAN, else same phone), so a
-  //    single sheet never inserts the same customer twice. Later non-empty wins.
-  const byLan = new Map();
-  const byPhone = new Map();
+  // 1) Merge only rows that share the SAME identity key within this import, so
+  //    the same application isn't inserted twice — but different applications of
+  //    one customer (different Application IDs) stay as separate rows.
+  const byKey = new Map();
   const merged = [];
   const mergeInto = (dst, rec) => {
     for (const c of IMPORT_COLS) if (rec[c] != null && rec[c] !== "") dst[c] = rec[c];
     if (rec.extra && Object.keys(rec.extra).length) dst.extra = { ...(dst.extra || {}), ...rec.extra };
   };
   for (const rec of records) {
-    let target =
-      (rec.lan && byLan.get(rec.lan)) || (rec.phone && byPhone.get(rec.phone)) || null;
-    if (!target) {
-      target = { lan: null, name: null, phone: null, email: null, application_id: null, loan_id: null, lenders_name: null, extra: {} };
-      merged.push(target);
+    const k = rowKey(rec);
+    if (k && byKey.has(k)) {
+      mergeInto(byKey.get(k), rec);
+      continue;
     }
+    const target = { lan: null, name: null, phone: null, email: null, application_id: null, loan_id: null, lenders_name: null, extra: {} };
     mergeInto(target, rec);
-    if (target.lan) byLan.set(target.lan, target);
-    if (target.phone) byPhone.set(target.phone, target);
+    merged.push(target);
+    if (k) byKey.set(k, target);
   }
 
-  // 2) Snapshot existing keys for just the incoming records (scoped so a single
-  //    chunk of a large import doesn't scan the whole table).
-  const existLan = new Map();
-  const existPhone = new Map();
+  // 2) Snapshot existing rows matching any incoming key (scoped for speed).
+  const apps = [], lans = [], phones = [];
+  for (const r of merged) {
+    if (r.application_id) apps.push(r.application_id);
+    if (r.lan) lans.push(r.lan);
+    if (r.phone) phones.push(r.phone);
+  }
+  const existApp = new Map(), existLan = new Map(), existPhone = new Map();
   {
     const { rows } = await query(
-      `SELECT id, lan, phone FROM customers
-        WHERE lan = ANY($1::text[]) OR phone = ANY($2::text[])`,
-      [[...byLan.keys()], [...byPhone.keys()]]
+      `SELECT id, application_id, lan, phone FROM customers
+        WHERE application_id = ANY($1::text[]) OR lan = ANY($2::text[]) OR phone = ANY($3::text[])`,
+      [apps, lans, phones]
     );
     for (const r of rows) {
-      if (r.lan) existLan.set(r.lan, r.id);
+      if (r.application_id && !existApp.has(r.application_id)) existApp.set(r.application_id, r.id);
+      if (r.lan && !existLan.has(r.lan)) existLan.set(r.lan, r.id);
       if (r.phone && !existPhone.has(r.phone)) existPhone.set(r.phone, r.id);
     }
   }
   const inserts = [];
   const updates = [];
   for (const rec of merged) {
-    const id =
-      (rec.lan && existLan.get(rec.lan)) || (rec.phone && existPhone.get(rec.phone)) || null;
+    // A row WITH an Application ID matches only by that id (a new application =
+    // a new row, even for an existing customer). Otherwise fall back to LAN/phone.
+    let id = null;
+    if (rec.application_id) id = existApp.get(rec.application_id) || null;
+    else id = (rec.lan && existLan.get(rec.lan)) || (rec.phone && existPhone.get(rec.phone)) || null;
     if (id) updates.push({ id, rec });
     else inserts.push(rec);
   }

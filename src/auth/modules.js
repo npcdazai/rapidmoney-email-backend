@@ -37,6 +37,7 @@ export const hasAnyMail = (mods = []) => MAIL_SECTIONS.some((s) => mods.includes
 export function requiredMailSection(q = {}) {
   if (q.status) return "mail.status";
   if (q.auto_replied === "true" || q.manual_review === "true") return "mail.automation";
+  if (q.partner) return "mail.other";
   if (q.uncategorized === "true" || q.category === "spam") return "mail.other";
   if (q.group || q.category) return "mail.qrc";
   return "mail.main"; // inbox, flagged, breached, all, plain search

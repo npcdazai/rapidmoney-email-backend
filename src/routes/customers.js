@@ -82,7 +82,7 @@ customersRouter.delete("/", async (req, res, next) => {
 customersRouter.get("/export.xlsx", requireModule("analytics"), async (req, res, next) => {
   try {
     const rows = await buildExportRows({ from: req.query.from, to: req.query.to });
-    const buf = toWorkbookBuffer(rows);
+    const buf = await toWorkbookBuffer(rows);
     const stamp = new Date().toISOString().slice(0, 10);
     res.setHeader(
       "Content-Type",

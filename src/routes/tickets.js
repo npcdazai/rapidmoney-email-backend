@@ -5,6 +5,8 @@ import { sendReply } from "../services/emailSender.js";
 import { maybeAutoReply } from "../services/autoReply.js";
 import { CATEGORY_CODES, CATEGORIES, GROUPS } from "../services/classifier.js";
 import { reclassify } from "../migrate.js";
+import { triggerMailSync } from "../services/emailPoller.js";
+import { PARTNERS, partnerByKey, partnerCondition } from "../partners.js";
 import { requireModule, activityLog } from "../auth/middleware.js";
 import { MAIL_SECTIONS, requiredMailSection } from "../auth/modules.js";
 
@@ -110,6 +112,20 @@ ticketsRouter.get("/folders", async (_req, res, next) => {
       out[`grp_${g}_total`] = codes.reduce((s, c) => s + out[`cat_${c}`], 0);
       out[`grp_${g}_unread`] = codes.reduce((s, c) => s + out[`cat_${c}_unread`], 0);
     }
+    // Partner/system sender counts (Easebuzz, RFSPL, …)
+    await Promise.all(
+      PARTNERS.map(async (p) => {
+        const params = [];
+        const cond = partnerCondition(p, params);
+        const { rows: pc } = await query(
+          `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE is_read = FALSE) AS unread
+             FROM tickets WHERE ${cond}`,
+          params
+        );
+        out[`partner_${p.key}_total`] = Number(pc[0].total);
+        out[`partner_${p.key}_unread`] = Number(pc[0].unread);
+      })
+    );
     res.json(out);
   } catch (e) {
     next(e);
@@ -278,6 +294,19 @@ ticketsRouter.get("/analytics", async (req, res, next) => {
   }
 });
 
+// POST /api/tickets/sync — fetch new mail from the inbox now (any mail user).
+// Queues newly-arrived messages for the worker to ingest.
+ticketsRouter.post("/sync", async (_req, res, next) => {
+  try {
+    const queued = await triggerMailSync();
+    if (queued === null)
+      return res.status(502).json({ detail: "Mail sync failed — could not reach the inbox." });
+    res.json({ ok: true, queued: queued < 0 ? 0 : queued, busy: queued < 0 });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // POST /api/tickets/reclassify — re-run the keyword classifier.
 // body: { all: true } reclassifies every ticket; default only uncategorized.
 ticketsRouter.post("/reclassify", async (req, res, next) => {
@@ -325,6 +354,11 @@ ticketsRouter.get("/", async (req, res, next) => {
     if (req.query.auto_replied === "true") where.push("auto_replied = TRUE");
     if (req.query.manual_review === "true")
       where.push("needs_manual_review = TRUE AND status NOT IN ('Resolved','Closed')");
+    // Partner/system sender folder (Easebuzz, RFSPL, …)
+    if (req.query.partner) {
+      const p = partnerByKey(req.query.partner);
+      if (p) where.push(partnerCondition(p, params));
+    }
     if (req.query.unread === "true") where.push("is_read = FALSE");
     if (req.query.uncategorized === "true") where.push("category IS NULL");
     // QRC group filter → member categories
